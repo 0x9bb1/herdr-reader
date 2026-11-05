@@ -1,0 +1,65 @@
+id = "luna7.reader"
+name = "reader"
+version = "0.1.0"
+min_herdr_version = "0.9.3"
+platforms = ["macos", "linux"]
+description = "Read a book one line at a time in a small pane, disguised as log output."
+
+# Builds the binary into bin/ on `plugin install`; `plugin link` skips this, so run it by hand.
+[[build]]
+platforms = ["macos", "linux"]
+command = ["bash", "herdr/install.sh"]
+
+# The pane is labeled "logs" so it blends in.
+[[panes]]
+id = "pane"
+title = "logs"
+placement = "split"
+command = ["bin/herdr-reader"]
+
+[[actions]]
+id = "toggle"
+title = "logs: toggle pane"
+contexts = ["pane", "workspace"]
+command = ["bin/herdr-reader", "--action", "toggle"]
+
+[[actions]]
+id = "open"
+title = "logs: open pane"
+contexts = ["pane", "workspace"]
+command = ["bin/herdr-reader", "--action", "open"]
+
+[[actions]]
+id = "close"
+title = "logs: close pane"
+contexts = ["pane", "workspace"]
+command = ["bin/herdr-reader", "--action", "close"]
+
+# next / prev / boss talk to the running pane over a socket, so focus can stay elsewhere.
+[[actions]]
+id = "next"
+title = "logs: next"
+contexts = ["pane", "workspace"]
+command = ["bin/herdr-reader", "--action", "next"]
+
+[[actions]]
+id = "prev"
+title = "logs: prev"
+contexts = ["pane", "workspace"]
+command = ["bin/herdr-reader", "--action", "prev"]
+
+[[actions]]
+id = "boss"
+title = "logs: switch"
+contexts = ["pane", "workspace"]
+command = ["bin/herdr-reader", "--action", "boss"]
+
+# Keep the reader in the tab you are looking at: on every tab / workspace switch it is moved
+# under the focused pane (and re-fitted to `pane_rows`).
+[[events]]
+on = "tab.focused"
+command = ["bin/herdr-reader", "--action", "follow"]
+
+[[events]]
+on = "workspace.focused"
+command = ["bin/herdr-reader", "--action", "follow"]
