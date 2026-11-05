@@ -9,7 +9,7 @@
 
 支持 TXT（UTF-8 / GBK / GB18030）、EPUB、PDF（需要有文字层）。每本书的阅读进度会自动保存。
 
-切换 tab / workspace 时，阅读 pane 会自动跟过去，挪到当前 pane 的下方，阅读不中断。
+切换 tab / workspace 时，阅读 pane 会自动跟过去，挪到当前 pane 的下方，阅读不中断。离开一个 tab 时会在原位置留一个同样高度的占位 pane（几行静止的假日志），下次切回来直接顶替它，上面的 pane（比如 Claude Code）高度不变，不会闪、也不会画错；只有第一次进入某个 tab 时需要分屏。关闭阅读 pane 时占位 pane 会一起清掉。
 
 ## 安装
 

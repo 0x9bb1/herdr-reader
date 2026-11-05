@@ -61,13 +61,7 @@ struct App {
 
 impl App {
     fn new(cfg: Config, store: Store, cols: u16, rows: u16) -> App {
-        let module_w = cfg
-            .modules
-            .iter()
-            .map(|m| m.chars().count())
-            .chain(OWN_MODULES.iter().map(|m| m.len()))
-            .max()
-            .unwrap_or(4);
+        let module_w = module_width(&cfg);
         App {
             cfg,
             store,
@@ -461,6 +455,46 @@ impl Drop for Control {
     fn drop(&mut self) {
         if fs::metadata(&self.path).is_ok_and(|m| m.ino() == self.ino) {
             let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn module_width(cfg: &Config) -> usize {
+    cfg.modules
+        .iter()
+        .map(|m| m.chars().count())
+        .chain(OWN_MODULES.iter().map(|m| m.len()))
+        .max()
+        .unwrap_or(4)
+}
+
+/// The pane the reader leaves behind in a tab it moves out of, so the pane above keeps its
+/// height (see `actions::follow`). Shows a few frozen lines of fake log and waits to be closed.
+pub fn placeholder() -> Result<()> {
+    let cfg = config::load();
+    let module_w = module_width(&cfg);
+    let _term = TermGuard::enter()?;
+    let mut rng = Rng::new();
+    let mut t = now();
+    let mut entries: Vec<Entry> = (0..50)
+        .map(|_| {
+            t -= rng.range(1, 6) as i64;
+            disguise::fake_entry(&mut rng, &cfg.modules, t)
+        })
+        .collect();
+    entries.reverse();
+    let mut out = io::stdout();
+    let mut size = (0, 0);
+    loop {
+        let (cols, rows) = terminal::size()?;
+        if (cols, rows) != size {
+            size = (cols, rows);
+            let tail = entries.len().saturating_sub(rows as usize);
+            render::draw(&mut out, &entries[tail..], module_w, cols, rows)?;
+        }
+        // Drain input so stray keys do nothing; only a resize matters.
+        if event::poll(Duration::from_millis(500))? {
+            let _ = event::read()?;
         }
     }
 }

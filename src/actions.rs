@@ -84,17 +84,88 @@ fn pane_file() -> std::path::PathBuf {
     config::state_dir().join("pane")
 }
 
+fn holders_file() -> std::path::PathBuf {
+    config::state_dir().join("placeholders")
+}
+
+/// Whether `pane`'s foreground process is this binary, run as a placeholder or as the reader.
+/// Pane ids get reused, so a stored id alone is never trusted.
+fn runs_us(pane: &str, placeholder: bool) -> bool {
+    let Ok(info) = herdr(&["pane", "process-info", "--pane", pane]) else { return false };
+    let Some(procs) = info["result"]["process_info"]["foreground_processes"].as_array() else {
+        return false;
+    };
+    // herdr 0.9.3 reports `argv` and `name` per process (no `argv0`); match either.
+    procs.iter().any(|p| {
+        let ours = p["argv"][0]
+            .as_str()
+            .or_else(|| p["name"].as_str())
+            .is_some_and(|a| Path::new(a).file_name().is_some_and(|n| n == BIN_NAME));
+        let holder = p["argv"].as_array().is_some_and(|a| a.iter().any(|x| x == "--placeholder"));
+        ours && holder == placeholder
+    })
+}
+
 /// The pane id the last `open` created, if that pane still runs the reader.
 fn live_pane() -> Option<String> {
     let id = fs::read_to_string(pane_file()).ok()?.trim().to_string();
-    let info = herdr(&["pane", "process-info", "--pane", &id]).ok()?;
-    let procs = info["result"]["process_info"]["foreground_processes"].as_array()?;
-    // herdr 0.9.3 reports `argv` and `name` per process (no `argv0`); match either.
-    procs
+    runs_us(&id, false).then_some(id)
+}
+
+fn stored_holders() -> Vec<String> {
+    fs::read_to_string(holders_file())
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+fn save_holders(ids: &[String]) -> Result<()> {
+    if ids.is_empty() {
+        let _ = fs::remove_file(holders_file());
+    } else {
+        fs::write(holders_file(), ids.join("\n") + "\n")?;
+    }
+    Ok(())
+}
+
+fn snapshot() -> Result<Value> {
+    Ok(herdr(&["api", "snapshot"])?["result"]["snapshot"].take())
+}
+
+/// The layout (one per tab) holding `pane`.
+fn tab_of<'a>(layouts: &'a [Value], pane: &str) -> Option<&'a Value> {
+    layouts
         .iter()
-        .filter_map(|p| p["argv"][0].as_str().or_else(|| p["name"].as_str()))
-        .any(|a| Path::new(a).file_name().is_some_and(|n| n == BIN_NAME))
-        .then_some(id)
+        .find(|l| l["panes"].as_array().is_some_and(|ps| ps.iter().any(|p| p["pane_id"] == pane)))
+}
+
+fn panes_of(layout: Option<&Value>) -> &[Value] {
+    layout.and_then(|l| l["panes"].as_array()).map(Vec::as_slice).unwrap_or_default()
+}
+
+/// Take out of `holders` the placeholder sitting right under `pane`, if there is one.
+fn take_holder_under(layouts: &[Value], holders: &mut Vec<String>, pane: &str) -> Option<String> {
+    let panes = panes_of(tab_of(layouts, pane));
+    let i = holders.iter().position(|h| {
+        panes.iter().any(|p| p["pane_id"] == h.as_str()) && pane_above(panes, h).as_deref() == Some(pane)
+    })?;
+    let h = holders.remove(i);
+    runs_us(&h, true).then_some(h)
+}
+
+/// Open the reader or a placeholder (`entrypoint`) as a split of `target`, without focus.
+fn open_split(entrypoint: &str, target: &str, direction: &str) -> Result<String> {
+    let res = herdr(&[
+        "plugin", "pane", "open", "--plugin", PLUGIN_ID, "--entrypoint", entrypoint,
+        "--placement", "split", "--direction", direction, "--target-pane", target, "--no-focus",
+    ])?;
+    Ok(res["result"]["plugin_pane"]["pane"]["pane_id"]
+        .as_str()
+        .context("plugin pane open: no pane id in reply")?
+        .to_string())
 }
 
 fn focused_pane() -> Result<String> {
@@ -118,14 +189,15 @@ fn rect_height(layout: &Value, pane: &str) -> Option<f64> {
 /// Squeeze the freshly split pane down to `rows` usable rows. Resizing `above` toward `down`
 /// moves the split right under it, which is the one shared with the new pane, even when the
 /// layout is nested (resizing the new pane itself can move a different split).
-fn shrink(pane: &str, above: &str, rows: u16) -> Result<()> {
+/// Returns whether a resize was issued.
+fn shrink(pane: &str, above: &str, rows: u16) -> Result<bool> {
     let layout = herdr(&["pane", "layout", "--pane", pane])?;
     let (Some(h_new), Some(h_above)) = (rect_height(&layout, pane), rect_height(&layout, above)) else {
-        return Ok(()); // not stacked as expected; leave herdr's default size
+        return Ok(false); // not stacked as expected; leave herdr's default size
     };
     let need = f64::from(rows + FRAME_ROWS);
     if h_new == need {
-        return Ok(());
+        return Ok(false);
     }
     let total = h_new + h_above;
     let ratio = h_above / total;
@@ -134,11 +206,25 @@ fn shrink(pane: &str, above: &str, rows: u16) -> Result<()> {
     let target = ((total - need) / total).clamp(0.5, MAX_RATIO);
     let delta = target - ratio;
     if delta.abs() < 0.5 / total {
-        return Ok(());
+        return Ok(false);
     }
     let (dir, amount) = if delta > 0.0 { ("down", delta) } else { ("up", -delta) };
     herdr(&["pane", "resize", "--pane", above, "--direction", dir, "--amount", &format!("{amount:.4}")])?;
-    Ok(())
+    Ok(true)
+}
+
+/// Delay before `refocus`, so the pane above has repainted at its new size first.
+const REFOCUS_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// Shrinking the pane in the tab on screen leaves it drawn at the old size and scrolled
+/// off the bottom until it is clicked (seen with Claude Code). Re-focusing it does what the
+/// click does. Skipped if focus moved on meanwhile, so we never pull the user back.
+fn refocus(reader: &str, above: &str) {
+    std::thread::sleep(REFOCUS_DELAY);
+    let still_there = snapshot().is_ok_and(|s| s["focused_pane_id"] == above);
+    if still_there {
+        let _ = herdr(&["pane", "focus", "--pane", reader, "--direction", "up"]);
+    }
 }
 
 fn open() -> Result<()> {
@@ -147,17 +233,23 @@ fn open() -> Result<()> {
         return Ok(());
     }
     let target = focused_pane()?;
-    let res = herdr(&[
-        "plugin", "pane", "open", "--plugin", PLUGIN_ID, "--entrypoint", "pane",
-        "--placement", "split", "--direction", "down", "--target-pane", &target, "--no-focus",
-    ])?;
-    let id = res["result"]["plugin_pane"]["pane"]["pane_id"]
-        .as_str()
-        .context("plugin pane open: no pane id in reply")?
-        .to_string();
+    // Placeholders outlive a reader that quit on its own (`q`); reuse the one under `target`.
+    let s = snapshot()?;
+    let layouts = s["layouts"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let mut holders: Vec<String> =
+        stored_holders().into_iter().filter(|h| tab_of(layouts, h).is_some()).collect();
+    let id = match take_holder_under(layouts, &mut holders, &target) {
+        Some(h) => {
+            let id = open_split("pane", &h, "right")?;
+            herdr(&["pane", "close", &h])?;
+            id
+        }
+        None => open_split("pane", &target, "down")?,
+    };
     let dir = config::state_dir();
     fs::create_dir_all(&dir)?;
     fs::write(pane_file(), &id)?;
+    save_holders(&holders)?;
     if let Err(e) = shrink(&id, &target, config::load().pane_rows.max(1)) {
         println!("reader: could not resize: {e:#}");
     }
@@ -182,43 +274,78 @@ fn pane_above(panes: &[Value], pane: &str) -> Option<String> {
         .map(String::from)
 }
 
+/// Move `pane` into `tab` next to `target`, splitting it `split` with `ratio`; returns the
+/// pane's id afterwards (a move into another workspace re-numbers it).
+fn move_to(pane: &str, tab: &str, target: &str, split: &str, ratio: &str) -> Result<String> {
+    let res = herdr(&[
+        "pane", "move", pane, "--tab", tab, "--target-pane", target, "--split", split, "--ratio", ratio,
+        "--no-focus",
+    ])?;
+    Ok(res["result"]["move_result"]["pane"]["pane_id"].as_str().unwrap_or(pane).to_string())
+}
+
 /// Event hook for `tab.focused` / `workspace.focused`: keep the reader in whatever tab has
 /// focus by moving it under the focused pane, and re-fit its height.
+///
+/// Squeezing the pane above while its tab is on screen makes it redraw (and Claude Code
+/// draws it wrong until clicked), so the reader leaves a same-sized placeholder behind in
+/// each tab it moves out of. Coming back, it slides in sideways next to that placeholder and
+/// the placeholder closes: no pane above it ever changes height. Only the first visit to a
+/// tab has to split and squeeze.
 fn follow() -> Result<()> {
     let Some(id) = live_pane() else { return Ok(()) };
-    let snap = herdr(&["api", "snapshot"])?;
-    let s = &snap["result"]["snapshot"];
+    let s = snapshot()?;
     let (Some(focused_tab), Some(focused_pane)) = (s["focused_tab_id"].as_str(), s["focused_pane_id"].as_str())
     else {
         return Ok(());
     };
     let layouts = s["layouts"].as_array().map(Vec::as_slice).unwrap_or_default();
-    let tab_of = |pane: &str| {
-        layouts.iter().find(|l| {
-            l["panes"].as_array().is_some_and(|ps| ps.iter().any(|p| p["pane_id"] == pane))
-        })
-    };
     let rows = config::load().pane_rows.max(1);
+    let here = tab_of(layouts, &id);
 
-    if tab_of(&id).is_some_and(|l| l["tab_id"] == focused_tab) {
+    if here.is_some_and(|l| l["tab_id"] == focused_tab) {
         // Already here: just make sure it is still the right height.
-        let panes = tab_of(&id).and_then(|l| l["panes"].as_array()).map(Vec::as_slice).unwrap_or_default();
-        if let Some(above) = pane_above(panes, &id) {
-            shrink(&id, &above, rows)?;
+        if let Some(above) = pane_above(panes_of(here), &id) {
+            if shrink(&id, &above, rows)? {
+                refocus(&id, &above);
+            }
         }
         return Ok(());
     }
-    if focused_pane == id || tab_of(focused_pane).is_some_and(|l| l["zoomed"] == true) {
+    if focused_pane == id || tab_of(layouts, focused_pane).is_some_and(|l| l["zoomed"] == true) {
         return Ok(());
     }
-    let res = herdr(&[
-        "pane", "move", &id, "--tab", focused_tab, "--target-pane", focused_pane,
-        "--split", "down", "--ratio", "0.9", "--no-focus",
-    ])?;
-    // A move into another workspace re-numbers the pane, so take the id from the reply.
-    let new_id = res["result"]["move_result"]["pane"]["pane_id"].as_str().unwrap_or(&id).to_string();
+
+    let mut holders: Vec<String> =
+        stored_holders().into_iter().filter(|h| tab_of(layouts, h).is_some()).collect();
+    // Split the reader sideways so the placeholder inherits its whole slot once it leaves.
+    if pane_above(panes_of(here), &id).is_some() {
+        match open_split("placeholder", &id, "right") {
+            Ok(h) => holders.push(h),
+            Err(e) => println!("reader: no placeholder left behind: {e:#}"),
+        }
+    }
+    let slot = take_holder_under(layouts, &mut holders, focused_pane);
+    save_holders(&holders)?;
+
+    let new_id = match slot {
+        Some(h) => {
+            let new_id = move_to(&id, focused_tab, &h, "right", "0.5")?;
+            herdr(&["pane", "close", &h])?;
+            // Same height as before unless `pane_rows` changed meanwhile.
+            if shrink(&new_id, focused_pane, rows)? {
+                refocus(&new_id, focused_pane);
+            }
+            new_id
+        }
+        None => {
+            let new_id = move_to(&id, focused_tab, focused_pane, "down", "0.9")?;
+            shrink(&new_id, focused_pane, rows)?;
+            refocus(&new_id, focused_pane);
+            new_id
+        }
+    };
     fs::write(pane_file(), &new_id)?;
-    shrink(&new_id, focused_pane, rows)?;
     println!("reader: followed to {new_id}");
     Ok(())
 }
@@ -231,6 +358,12 @@ fn close() -> Result<()> {
         let _ = herdr(&["pane", "close", &id]);
         println!("reader: closed {id}");
     }
+    for h in stored_holders() {
+        if runs_us(&h, true) {
+            let _ = herdr(&["pane", "close", &h]);
+        }
+    }
     let _ = fs::remove_file(pane_file());
+    let _ = fs::remove_file(holders_file());
     Ok(())
 }

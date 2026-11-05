@@ -21,6 +21,7 @@ fn main() -> ExitCode {
     let res = match args.as_slice() {
         [flag, id] if flag == "--action" => actions::run(id),
         [flag, file] if flag == "--dump" => dump(file),
+        [flag] if flag == "--placeholder" => app::placeholder(),
         [h] if h == "-h" || h == "--help" => {
             println!("{USAGE}");
             Ok(())

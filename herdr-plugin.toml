@@ -17,6 +17,14 @@ title = "logs"
 placement = "split"
 command = ["bin/herdr-reader"]
 
+# Left behind in each tab the reader moves out of, so the pane above it keeps its height and
+# does not have to redraw when the reader comes back (see `follow` in src/actions.rs).
+[[panes]]
+id = "placeholder"
+title = "logs"
+placement = "split"
+command = ["bin/herdr-reader", "--placeholder"]
+
 [[actions]]
 id = "toggle"
 title = "logs: toggle pane"
