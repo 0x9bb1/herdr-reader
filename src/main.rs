@@ -9,7 +9,7 @@ mod render;
 use std::{env, path::PathBuf, process::ExitCode};
 
 const USAGE: &str = "\
-usage: herdr-reader [FILE]           read FILE (.txt/.epub/.pdf), or the last book
+usage: herdr-reader [FILE]           read FILE (.txt/.epub/.pdf/.azw3), or the last book
        herdr-reader --action <ID>    herdr plugin action: open|close|toggle|next|prev|boss|info
        herdr-reader --dump FILE      print the extracted paragraphs (check a PDF's text layer)
 

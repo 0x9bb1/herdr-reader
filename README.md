@@ -7,7 +7,7 @@
 17:05:26 INFO  [db    ] 第2段：……
 ```
 
-支持 TXT（UTF-8 / GBK / GB18030）、EPUB、PDF（需要有文字层）。每本书的阅读进度会自动保存。
+支持 TXT（UTF-8 / GBK / GB18030）、EPUB、PDF（需要有文字层）、AZW3（需要 Calibre）。每本书的阅读进度会自动保存。
 
 切换 tab / workspace 时，阅读 pane 会自动跟过去，挪到当前 pane 的下方，阅读不中断。离开一个 tab 时会在原位置留一个同样高度的占位 pane（几行静止的假日志），下次切回来直接顶替它，上面的 pane（比如 Claude Code）高度不变，不会闪、也不会画错；只有第一次进入某个 tab 时需要分屏。关闭阅读 pane 时占位 pane 会一起清掉。
 
@@ -91,3 +91,7 @@ herdr 把分屏比例限制在 0.9 以内，所以阅读 pane 最矮也要占所
 
 如果装了 `pdftotext`（`sudo apt install poppler-utils`）会优先用它，中文效果最好；没装就用内置的 Rust 解析器。
 可以先用 `bin/herdr-reader --dump 书.pdf` 看看文字抽得怎么样。扫描版 PDF 没有文字层，读不了。
+
+## AZW3
+
+AZW3（Kindle KF8）靠 Calibre 的 `ebook-convert` 先转成 EPUB 再读（`sudo apt install calibre`，或者用官方安装器装到 `/opt/calibre`）。转换要几秒，结果缓存在插件状态目录的 `cache/` 下，之后再打开就是秒开。带 DRM 的书读不了。
