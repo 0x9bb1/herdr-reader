@@ -191,7 +191,7 @@ pub fn draw(
                     SetForegroundColor(Color::DarkCyan),
                     Print(module),
                     Print(" "),
-                    SetForegroundColor(Color::DarkGrey),
+                    SetForegroundColor(Color::AnsiValue(249)),
                     Print(fit(&e.text, text_w)),
                     ResetColor,
                     Clear(ClearType::UntilNewLine),
