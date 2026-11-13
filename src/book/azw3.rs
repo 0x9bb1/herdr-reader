@@ -11,7 +11,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::config;
 
-/// Kindle AZW3 (KF8) has no parser here: calibre's `ebook-convert` turns it into an EPUB, which
+/// Kindle AZW3 (KF8) and MOBI have no parser here: calibre's `ebook-convert` turns it into an EPUB, which
 /// is cached under the state dir (conversion takes seconds) and read by the EPUB loader.
 pub fn load(path: &Path) -> Result<Vec<String>> {
     let epub = cache_path(path)?;
@@ -50,7 +50,7 @@ fn ebook_convert() -> Option<PathBuf> {
 
 fn convert(src: &Path, dst: &Path) -> Result<()> {
     let Some(tool) = ebook_convert() else {
-        bail!("reading .azw3 needs calibre's ebook-convert (sudo apt install calibre)");
+        bail!("reading .azw3 / .mobi needs calibre's ebook-convert (sudo apt install calibre)");
     };
     let dir = dst.parent().context("bad cache path")?;
     fs::create_dir_all(dir)?;

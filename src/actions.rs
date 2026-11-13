@@ -80,10 +80,6 @@ fn herdr(args: &[&str]) -> Result<Value> {
     serde_json::from_str(&stdout).with_context(|| format!("herdr {}: bad json", args[..2].join(" ")))
 }
 
-fn pane_file() -> std::path::PathBuf {
-    config::state_dir().join("pane")
-}
-
 fn holders_file() -> std::path::PathBuf {
     config::state_dir().join("placeholders")
 }
@@ -106,9 +102,25 @@ fn runs_us(pane: &str, placeholder: bool) -> bool {
     })
 }
 
+/// The reader's pane id and the tab it was last put in, as `open` / `follow` left them.
+/// Files written before the tab was recorded hold the pane id alone.
+fn stored_pane() -> Option<(String, Option<String>)> {
+    let s = fs::read_to_string(config::pane_file()).ok()?;
+    let mut lines = s.lines().map(str::trim);
+    let pane = lines.next().filter(|p| !p.is_empty())?.to_string();
+    let tab = lines.next().filter(|t| !t.is_empty()).map(String::from);
+    Some((pane, tab))
+}
+
+fn remember(pane: &str, tab: &str) -> Result<()> {
+    fs::create_dir_all(config::state_dir())?;
+    fs::write(config::pane_file(), format!("{pane}\n{tab}\n"))?;
+    Ok(())
+}
+
 /// The pane id the last `open` created, if that pane still runs the reader.
 fn live_pane() -> Option<String> {
-    let id = fs::read_to_string(pane_file()).ok()?.trim().to_string();
+    let (id, _) = stored_pane()?;
     runs_us(&id, false).then_some(id)
 }
 
@@ -232,25 +244,28 @@ fn open() -> Result<()> {
         println!("reader: already open in {id}");
         return Ok(());
     }
-    let target = focused_pane()?;
+    open_under(&focused_pane()?)
+}
+
+/// Open the reader under `target`, taking over the placeholder slot there if there is one.
+fn open_under(target: &str) -> Result<()> {
     // Placeholders outlive a reader that quit on its own (`q`); reuse the one under `target`.
     let s = snapshot()?;
     let layouts = s["layouts"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let tab = tab_of(layouts, target).and_then(|l| l["tab_id"].as_str()).unwrap_or_default().to_string();
     let mut holders: Vec<String> =
         stored_holders().into_iter().filter(|h| tab_of(layouts, h).is_some()).collect();
-    let id = match take_holder_under(layouts, &mut holders, &target) {
+    let id = match take_holder_under(layouts, &mut holders, target) {
         Some(h) => {
             let id = open_split("pane", &h, "right")?;
             herdr(&["pane", "close", &h])?;
             id
         }
-        None => open_split("pane", &target, "down")?,
+        None => open_split("pane", target, "down")?,
     };
-    let dir = config::state_dir();
-    fs::create_dir_all(&dir)?;
-    fs::write(pane_file(), &id)?;
+    remember(&id, &tab)?;
     save_holders(&holders)?;
-    if let Err(e) = shrink(&id, &target, config::load().pane_rows.max(1)) {
+    if let Err(e) = shrink(&id, target, config::load().pane_rows.max(1)) {
         println!("reader: could not resize: {e:#}");
     }
     println!("reader: opened {id}");
@@ -293,7 +308,7 @@ fn move_to(pane: &str, tab: &str, target: &str, split: &str, ratio: &str) -> Res
 /// the placeholder closes: no pane above it ever changes height. Only the first visit to a
 /// tab has to split and squeeze.
 fn follow() -> Result<()> {
-    let Some(id) = live_pane() else { return Ok(()) };
+    let Some(id) = live_pane() else { return revive() };
     let s = snapshot()?;
     let (Some(focused_tab), Some(focused_pane)) = (s["focused_tab_id"].as_str(), s["focused_pane_id"].as_str())
     else {
@@ -345,8 +360,29 @@ fn follow() -> Result<()> {
             new_id
         }
     };
-    fs::write(pane_file(), &new_id)?;
+    remember(&new_id, focused_tab)?;
     println!("reader: followed to {new_id}");
+    Ok(())
+}
+
+/// Closing a tab (or workspace) kills every pane in it, the reader included, and the tab you
+/// land in is left showing its placeholder's fake log. So when the reader died together with
+/// the tab it was in, reopen it under the focused pane, in the placeholder slot there.
+/// A reader that quit on purpose (`q`, `close`) has dropped the pane file, and one whose pane
+/// alone was closed still has its tab: both stay closed.
+fn revive() -> Result<()> {
+    let Some((_, Some(tab))) = stored_pane() else { return Ok(()) };
+    let s = snapshot()?;
+    let layouts = s["layouts"].as_array().map(Vec::as_slice).unwrap_or_default();
+    if layouts.iter().any(|l| l["tab_id"] == tab.as_str()) {
+        return Ok(());
+    }
+    let Some(focused) = s["focused_pane_id"].as_str() else { return Ok(()) };
+    if tab_of(layouts, focused).is_some_and(|l| l["zoomed"] == true) {
+        return Ok(());
+    }
+    open_under(focused)?;
+    println!("reader: reopened after tab {tab} closed");
     Ok(())
 }
 
@@ -363,7 +399,7 @@ fn close() -> Result<()> {
             let _ = herdr(&["pane", "close", &h]);
         }
     }
-    let _ = fs::remove_file(pane_file());
+    let _ = fs::remove_file(config::pane_file());
     let _ = fs::remove_file(holders_file());
     Ok(())
 }

@@ -539,5 +539,10 @@ pub fn run(path: Option<PathBuf>) -> Result<()> {
         app.tick();
     }
     app.save();
+    // Quitting on purpose (q, ctrl-c, the `close` action) closes the plugin pane for good, so
+    // forget it. A reader killed along with its tab never gets here, and `follow` revives it.
+    if std::env::var_os("HERDR_PLUGIN_ENTRYPOINT_ID").is_some_and(|e| e == "pane") {
+        let _ = fs::remove_file(config::pane_file());
+    }
     Ok(())
 }

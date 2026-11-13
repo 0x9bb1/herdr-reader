@@ -71,3 +71,13 @@ command = ["bin/herdr-reader", "--action", "follow"]
 [[events]]
 on = "workspace.focused"
 command = ["bin/herdr-reader", "--action", "follow"]
+
+# Closing the tab (or workspace) the reader is in kills it too; `follow` reopens it in the
+# tab you land in, in place of the placeholder there.
+[[events]]
+on = "tab.closed"
+command = ["bin/herdr-reader", "--action", "follow"]
+
+[[events]]
+on = "workspace.closed"
+command = ["bin/herdr-reader", "--action", "follow"]

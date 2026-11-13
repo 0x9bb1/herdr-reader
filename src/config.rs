@@ -26,6 +26,11 @@ pub fn socket_path() -> PathBuf {
     state_dir().join("reader.sock")
 }
 
+/// Where the actions remember the reader's pane id and tab id (see `actions::stored_pane`).
+pub fn pane_file() -> PathBuf {
+    state_dir().join("pane")
+}
+
 pub fn expand(s: &str) -> PathBuf {
     match s.strip_prefix("~/") {
         Some(rest) => home().join(rest),
@@ -37,7 +42,7 @@ pub fn expand(s: &str) -> PathBuf {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Folder scanned (two levels deep) for .txt / .epub / .pdf when pressing `o`.
+    /// Folder scanned (two levels deep) for .txt / .epub / .pdf / .azw3 / .mobi when pressing `o`.
     pub library: String,
     /// Fake module names put in front of each line, e.g. `[worker]`.
     pub modules: Vec<String>,

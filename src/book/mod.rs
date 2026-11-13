@@ -8,7 +8,7 @@ use std::path::Path;
 
 use anyhow::{bail, Result};
 
-const EXTS: [&str; 4] = ["txt", "epub", "pdf", "azw3"];
+const EXTS: [&str; 5] = ["txt", "epub", "pdf", "azw3", "mobi"];
 
 fn ext(path: &Path) -> String {
     path.extension()
@@ -26,7 +26,7 @@ pub fn load(path: &Path) -> Result<Vec<String>> {
     let paras = match ext(path).as_str() {
         "epub" => epub::load(path)?,
         "pdf" => pdf::load(path)?,
-        "azw3" => azw3::load(path)?,
+        "azw3" | "mobi" => azw3::load(path)?,
         _ => txt::load(path)?,
     };
     if paras.is_empty() {
