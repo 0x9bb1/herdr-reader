@@ -6,7 +6,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::Write,
     os::{fd::AsRawFd, unix::net::UnixStream},
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
 };
 
@@ -20,6 +20,8 @@ const FRAME_ROWS: u16 = 2;
 const BIN_NAME: &str = "herdr-reader";
 /// herdr clamps every split ratio to at most this (observed on 0.9.3).
 const MAX_RATIO: f64 = 0.9;
+/// The label herdr gives our panes: their `title` in herdr-plugin.toml.
+const PANE_LABEL: &str = "logs";
 
 pub fn run(action: &str) -> Result<()> {
     if let "next" | "prev" | "boss" | "info" | "quit" = action {
@@ -39,6 +41,7 @@ pub fn run(action: &str) -> Result<()> {
             }
         }
         "follow" => follow(),
+        "restore" => restore(Revive::OldSlot).map(drop),
         other => bail!("unknown action {other:?}"),
     }
 }
@@ -91,15 +94,108 @@ fn runs_us(pane: &str, placeholder: bool) -> bool {
     let Some(procs) = info["result"]["process_info"]["foreground_processes"].as_array() else {
         return false;
     };
-    // herdr 0.9.3 reports `argv` and `name` per process (no `argv0`); match either.
     procs.iter().any(|p| {
-        let ours = p["argv"][0]
-            .as_str()
-            .or_else(|| p["name"].as_str())
-            .is_some_and(|a| Path::new(a).file_name().is_some_and(|n| n == BIN_NAME));
         let holder = p["argv"].as_array().is_some_and(|a| a.iter().any(|x| x == "--placeholder"));
-        ours && holder == placeholder
+        is_us(p) && holder == placeholder
     })
+}
+
+/// Whether a `pane process-info` process entry is this binary.
+/// herdr 0.9.3 reports `argv` and `name` per process (no `argv0`); match either.
+fn is_us(p: &Value) -> bool {
+    p["argv"][0]
+        .as_str()
+        .or_else(|| p["name"].as_str())
+        .is_some_and(|a| Path::new(a).file_name().is_some_and(|n| n == BIN_NAME))
+}
+
+/// The folder herdr runs our commands in.
+fn plugin_root() -> Option<PathBuf> {
+    env::var_os("HERDR_PLUGIN_ROOT").map(PathBuf::from).or_else(|| env::current_dir().ok())
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    a == b || fs::canonicalize(a).is_ok_and(|a| fs::canonicalize(b).is_ok_and(|b| a == b))
+}
+
+/// Whether nothing but the shell runs in `pane`, and that shell is not this binary.
+fn idle_shell(pane: &str) -> bool {
+    let Ok(info) = herdr(&["pane", "process-info", "--pane", pane]) else { return false };
+    let info = &info["result"]["process_info"];
+    let procs = info["foreground_processes"].as_array().map(Vec::as_slice).unwrap_or_default();
+    info["shell_pid"].is_u64()
+        && info["foreground_process_group_id"] == info["shell_pid"]
+        && !procs.iter().any(is_us)
+}
+
+/// Our panes as a herdr server restart (an upgrade, say) leaves them: herdr saves a plugin
+/// pane as just its folder and label, so the reader and every placeholder come back as
+/// plain shells, labeled "logs", in the plugin folder, under their old pane ids.
+/// Returns (pane id, tab id) for each one nobody has started using.
+fn stale_panes() -> Result<Vec<(String, String)>> {
+    let Some(root) = plugin_root() else { return Ok(Vec::new()) };
+    let list = herdr(&["pane", "list"])?;
+    let panes = list["result"]["panes"].as_array().map(Vec::as_slice).unwrap_or_default();
+    Ok(panes
+        .iter()
+        .filter(|p| p["label"] == PANE_LABEL && p["cwd"].as_str().is_some_and(|c| same_dir(Path::new(c), &root)))
+        .filter_map(|p| Some((p["pane_id"].as_str()?.to_string(), p["tab_id"].as_str()?.to_string())))
+        .filter(|(id, _)| idle_shell(id))
+        .collect())
+}
+
+/// Which of the shells `restore` refills with the reader; the rest get placeholders.
+enum Revive<'a> {
+    /// The reader's own old slot (startup: it was open when herdr went down).
+    OldSlot,
+    /// The one right under this pane (`open`).
+    Under(&'a str),
+}
+
+/// Startup hook (and the first step of `open`): put our panes back after a herdr restart
+/// turned them into shells. Each one is refilled in place, by splitting it sideways and
+/// closing it, so no pane above changes height. Returns whether the reader was reopened.
+fn restore(revive: Revive) -> Result<bool> {
+    let stale = stale_panes()?;
+    if stale.is_empty() {
+        return Ok(false);
+    }
+    let reader = match revive {
+        Revive::OldSlot => stored_pane().map(|(id, _)| id),
+        Revive::Under(target) => {
+            let s = snapshot()?;
+            let layouts = s["layouts"].as_array().map(Vec::as_slice).unwrap_or_default();
+            let panes = panes_of(tab_of(layouts, target));
+            stale.iter().map(|(p, _)| p).find(|p| pane_above(panes, p).as_deref() == Some(target)).cloned()
+        }
+    };
+    let mut reopened = false;
+    let mut holders: Vec<String> =
+        stored_holders().into_iter().filter(|h| !stale.iter().any(|(p, _)| p == h)).collect();
+    for (pane, tab) in &stale {
+        let is_reader = reader.as_deref() == Some(pane.as_str());
+        let entrypoint = if is_reader { "pane" } else { "placeholder" };
+        let id = match open_split(entrypoint, pane, "right") {
+            Ok(id) => id,
+            Err(e) => {
+                println!("reader: could not refill {pane}: {e:#}");
+                continue;
+            }
+        };
+        if let Err(e) = herdr(&["pane", "close", pane]) {
+            println!("reader: could not close {pane}: {e:#}");
+        }
+        if is_reader {
+            remember(&id, tab)?;
+            reopened = true;
+            println!("reader: reopened in {id}");
+        } else {
+            holders.push(id);
+        }
+    }
+    save_holders(&holders)?;
+    println!("reader: refilled {} pane(s) left as shells", stale.len());
+    Ok(reopened)
 }
 
 /// The reader's pane id and the tab it was last put in, as `open` / `follow` left them.
@@ -244,7 +340,15 @@ fn open() -> Result<()> {
         println!("reader: already open in {id}");
         return Ok(());
     }
-    open_under(&focused_pane()?)
+    let target = focused_pane()?;
+    // Shells a herdr restart left in our slots (if the startup hook missed them) get refilled
+    // first: the one under `target` with the reader, so it does not land between the two.
+    match restore(Revive::Under(&target)) {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(e) => println!("reader: could not refill old panes: {e:#}"),
+    }
+    open_under(&target)
 }
 
 /// Open the reader under `target`, taking over the placeholder slot there if there is one.
@@ -398,6 +502,10 @@ fn close() -> Result<()> {
         if runs_us(&h, true) {
             let _ = herdr(&["pane", "close", &h]);
         }
+    }
+    // Shells a herdr restart left in our old slots.
+    for (pane, _) in stale_panes().unwrap_or_default() {
+        let _ = herdr(&["pane", "close", &pane]);
     }
     let _ = fs::remove_file(config::pane_file());
     let _ = fs::remove_file(holders_file());

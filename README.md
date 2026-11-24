@@ -11,6 +11,8 @@
 
 切换 tab / workspace 时，阅读 pane 会自动跟过去，挪到当前 pane 的下方，阅读不中断。离开一个 tab 时会在原位置留一个同样高度的占位 pane（几行静止的假日志），下次切回来直接顶替它，上面的 pane（比如 Claude Code）高度不变，不会闪、也不会画错；只有第一次进入某个 tab 时需要分屏。关闭阅读 pane 时占位 pane 会一起清掉。如果直接关掉了阅读 pane 所在的 tab（或 workspace），阅读 pane 会在你落到的那个 tab 里重新打开，顶替那里的占位 pane，进度接着读。
 
+重启 herdr server（比如升级 herdr）后，herdr 只会把插件 pane 恢复成标题还是 `logs` 的普通 shell。插件的 startup hook 会把它们原位换回来：阅读 pane 回到原来的位置接着读，其余的变回占位 pane。万一 hook 没跑到，按 `toggle` / `open` 也会顺手修好，`close` 会把这些残留的 shell 一起清掉。
+
 ## 安装
 
 需要 herdr 0.9.3 以上版本，以及 Rust 工具链（`cargo`）：安装时会从源码编译。仅支持 Linux / macOS。

@@ -81,3 +81,8 @@ command = ["bin/herdr-reader", "--action", "follow"]
 [[events]]
 on = "workspace.closed"
 command = ["bin/herdr-reader", "--action", "follow"]
+
+# A herdr server restart (an upgrade, say) brings plugin panes back as plain shells; put the
+# reader and its placeholders back in their slots.
+[[startup]]
+command = ["bin/herdr-reader", "--action", "restore"]
